@@ -69,7 +69,7 @@ cd antigravity-cli
 npm install
 ```
 
-**Requirements:** Node.js v18+ and a Google One AI Premium subscription.
+**Requirements:** Node.js v18+ and a Gmail account.
 
 ---
 
