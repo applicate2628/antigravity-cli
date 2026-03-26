@@ -1,6 +1,8 @@
-# 🔓 Antigravity Unlocked
+# 🔓 Antigravity CLI
 
 **Use Claude Opus 4.6, Gemini 3.1 Pro and other premium AI models outside of Antigravity IDE — from your terminal, Cursor, VSCode, or any OpenAI-compatible tool.**
+
+![Antigravity CLI Demo](Recording%202026-03-25%20224251.gif)
 
 Antigravity IDE locks its AI features inside its own editor window. This CLI breaks that limitation by exposing the same models as a local OpenAI-compatible API server, so you can use them **anywhere**.
 
@@ -34,8 +36,8 @@ Antigravity IDE locks its AI features inside its own editor window. This CLI bre
 ## 📦 Installation
 
 ```bash
-git clone https://github.com/user/antigravity-unlocked.git
-cd antigravity-unlocked
+git clone https://github.com/krmslmz/antigravity-cli.git
+cd antigravity-cli
 npm install
 ```
 
@@ -226,12 +228,12 @@ Check Account 1 quota ──── >95% used? ──── Skip, try next
     │ <5% used                                 ▼
     │                              Check Account 2 quota ──── >95%? ──── Skip
     ▼                                          │
-Send request                                   │ OK
-    │                                          ▼
-    ▼                                  Send request
-Return response                            │
-                                           ▼
-                                   Return response
+    │ OK                                       │ OK
+    ▼                                          ▼
+Send request                               Send request
+    │                                          │
+    ▼                                          ▼
+Return response                            Return response
 ```
 
 - Checks remaining credits **before** each request
@@ -244,7 +246,7 @@ Return response                            │
 ## 📁 Project Structure
 
 ```
-antigravity-unlocked/
+antigravity-cli/
 ├── index.js           # CLI: login, ask, serve, status commands
 ├── api-server.js      # OpenAI-compatible Express API server
 ├── auth.js            # Token management & auto-refresh
@@ -271,5 +273,5 @@ MIT
 ---
 
 <p align="center">
-  <b>Antigravity Unlocked</b> — Use Claude & Gemini anywhere, not just inside an IDE. 🧠⚡
+  <b>Antigravity CLI</b> — Use Claude & Gemini anywhere, not just inside an IDE. 🧠⚡
 </p>
