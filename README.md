@@ -8,9 +8,37 @@ Antigravity IDE locks its AI features inside its own editor window. This CLI bre
 
 > **What this does:** Your Google One AI Premium subscription gives you access to Claude Opus, Gemini Pro, etc. through Antigravity IDE. This tool lets you use those same models from any tool — not just the Antigravity editor.
 
+### 🚀 Integration with Developer Tools
+
+This CLI is designed to act as a bridge for your favorite AI-powered development tools. Since it mimics the OpenAI and Anthropic API formats, you can use it to bypass individual account limits by pooling multiple accounts.
+
+#### 🤖 Using with Claude Code (Anthropic CLI)
+You can use this with the official `@anthropic-ai/claude-code` by pointing the base URL to your local server:
+```bash
+# Set environment variables
+export ANTHROPIC_BASE_URL="http://localhost:6012/v1"
+export ANTHROPIC_API_KEY="sk-anything"
+
+# Start Claude Code
+claude
+```
+
+#### 🏗️ Using with Aider
+Aider is a popular command-line chat tool. Use it with Antigravity CLI like this:
+```bash
+aider --openai-api-base http://localhost:6012/v1 --openai-api-key sk-anything --model openai/claude-opus-4-6-thinking
+```
+
+#### ✍️ Using with Cursor / VSCode (Continue)
+In your IDE settings, add a "Manual" or "OpenAI-Compatible" model:
+- **Model Name:** `claude-opus-4-6-thinking`
+- **Base URL:** `http://localhost:6012/v1`
+- **API Key:** `sk-anything`
+
 ---
 
-## 🎯 Why Does This Exist?
+## 🎯 Why Use This?
+
 
 | Without this tool | With this tool |
 |---|---|
