@@ -27,13 +27,26 @@ export async function startApiServer(port) {
             // Hard-coded to Claude Opus 4.6 Thinking (ignores client model selection)
             const model = 'claude-opus-4-6-thinking';
             
-            // Extract the last user message
-            const lastUserMsg = messages.filter(m => m.role === 'user').pop();
-            const prompt = lastUserMsg ? lastUserMsg.content : '';
+            // Extract system message and build conversation
+            const systemMsg = messages.filter(m => m.role === 'system').map(m => m.content).join('\n');
+            let conversationParts = [];
+            for (const msg of messages) {
+                if (msg.role === 'system') continue; // handled separately
+                const text = typeof msg.content === 'string' ? msg.content : 
+                    Array.isArray(msg.content) ? msg.content.filter(b => b.type === 'text').map(b => b.text).join('\n') : '';
+                if (text) {
+                    conversationParts.push({ role: msg.role === 'assistant' ? 'model' : 'user', parts: [{ text }] });
+                }
+            }
 
-            if (!prompt) {
+            if (conversationParts.length === 0) {
                 return res.status(400).json({ error: "No valid prompt found in messages array." });
             }
+
+            // Combine system messages
+            const combinedSystem = systemMsg
+                ? `${ANTIGRAVITY_SYSTEM_INSTRUCTION}\n\n--- Client System Prompt ---\n${systemMsg}`
+                : ANTIGRAVITY_SYSTEM_INSTRUCTION;
 
             let success = false;
             let retryCount = 0;
@@ -52,7 +65,7 @@ export async function startApiServer(port) {
                         url = `https://generativelanguage.googleapis.com/v1beta/models/${apiModel}:${stream ? 'streamGenerateContent?alt=sse' : 'generateContent'}?key=${keys[currentKeyIndex]}`;
                         headers = { 'Content-Type': 'application/json' };
                         requestBody = {
-                            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+                            contents: conversationParts,
                             generationConfig: { temperature, maxOutputTokens: 8192 }
                         };
                     } else {
@@ -68,8 +81,8 @@ export async function startApiServer(port) {
                             project: DEFAULT_PROJECT_ID,
                             model: apiModel,
                             request: {
-                                contents: [{ role: 'user', parts: [{ text: prompt }] }],
-                                systemInstruction: { parts: [{ text: ANTIGRAVITY_SYSTEM_INSTRUCTION }] },
+                                contents: conversationParts,
+                                systemInstruction: { parts: [{ text: combinedSystem }] },
                                 generationConfig: { temperature, maxOutputTokens: 8192 }
                             }
                         };
@@ -260,23 +273,31 @@ export async function startApiServer(port) {
                 return res.status(401).json({ type: 'error', error: { type: 'authentication_error', message: "No auth tokens found. Run 'node index.js login' first." }});
             }
 
-            const { messages = [], stream = false, max_tokens = 8192, temperature = 0.7 } = req.body;
+            const { messages = [], system = '', stream = false, max_tokens = 8192, temperature = 0.7 } = req.body;
             const model = 'claude-opus-4-6-thinking';
 
-            // Extract last user message
-            const lastUserMsg = messages.filter(m => m.role === 'user').pop();
-            let prompt = '';
-            if (lastUserMsg) {
-                if (typeof lastUserMsg.content === 'string') {
-                    prompt = lastUserMsg.content;
-                } else if (Array.isArray(lastUserMsg.content)) {
-                    prompt = lastUserMsg.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+            // Build conversation contents from all messages
+            let conversationParts = [];
+            for (const msg of messages) {
+                let text = '';
+                if (typeof msg.content === 'string') {
+                    text = msg.content;
+                } else if (Array.isArray(msg.content)) {
+                    text = msg.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+                }
+                if (text) {
+                    conversationParts.push({ role: msg.role === 'assistant' ? 'model' : 'user', parts: [{ text }] });
                 }
             }
 
-            if (!prompt) {
+            if (conversationParts.length === 0) {
                 return res.status(400).json({ type: 'error', error: { type: 'invalid_request_error', message: 'No valid prompt found.' }});
             }
+
+            // Combine Claude Code's system prompt with Antigravity's required system instruction
+            const combinedSystemPrompt = system
+                ? `${ANTIGRAVITY_SYSTEM_INSTRUCTION}\n\n--- Client System Prompt ---\n${system}`
+                : ANTIGRAVITY_SYSTEM_INSTRUCTION;
 
             let success = false;
             let retryCount = 0;
@@ -300,8 +321,8 @@ export async function startApiServer(port) {
                         project: DEFAULT_PROJECT_ID,
                         model: apiModel,
                         request: {
-                            contents: [{ role: 'user', parts: [{ text: prompt }] }],
-                            systemInstruction: { parts: [{ text: ANTIGRAVITY_SYSTEM_INSTRUCTION }] },
+                            contents: conversationParts,
+                            systemInstruction: { parts: [{ text: combinedSystemPrompt }] },
                             generationConfig: { temperature, maxOutputTokens: max_tokens,
                                 thinkingConfig: { includeThoughts: true, thinkingBudget: 1024 }
                             }
