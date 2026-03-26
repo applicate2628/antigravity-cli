@@ -7,7 +7,7 @@ import { getValidTokens } from './auth.js';
 
 export async function startApiServer(port) {
     const app = express();
-    app.use(express.json());
+    app.use(express.json({ limit: '50mb' }));
 
     // Load tokens (re-reads on each request for hot-reload support)
     const getKeys = async () => {
@@ -238,10 +238,193 @@ export async function startApiServer(port) {
         }
     });
 
+    // --- /v1/models endpoint (for Claude Code / tool validation) ---
+    app.get('/v1/models', (req, res) => {
+        res.json({
+            object: 'list',
+            data: [
+                { id: 'claude-opus-4-6-thinking', object: 'model', created: 1700000000, owned_by: 'antigravity' },
+                { id: 'claude-sonnet-4-6', object: 'model', created: 1700000000, owned_by: 'antigravity' },
+                { id: 'gemini-3.1-pro-high', object: 'model', created: 1700000000, owned_by: 'antigravity' },
+                { id: 'gemini-3.1-pro-low', object: 'model', created: 1700000000, owned_by: 'antigravity' },
+                { id: 'gemini-3-flash-agent', object: 'model', created: 1700000000, owned_by: 'antigravity' },
+            ]
+        });
+    });
+
+    // --- /v1/messages endpoint (Anthropic/Claude Code CLI compatibility) ---
+    app.post('/v1/messages', async (req, res) => {
+        try {
+            const keys = await getKeys();
+            if (keys.length === 0) {
+                return res.status(401).json({ type: 'error', error: { type: 'authentication_error', message: "No auth tokens found. Run 'node index.js login' first." }});
+            }
+
+            const { messages = [], stream = false, max_tokens = 8192, temperature = 0.7 } = req.body;
+            const model = 'claude-opus-4-6-thinking';
+
+            // Extract last user message
+            const lastUserMsg = messages.filter(m => m.role === 'user').pop();
+            let prompt = '';
+            if (lastUserMsg) {
+                if (typeof lastUserMsg.content === 'string') {
+                    prompt = lastUserMsg.content;
+                } else if (Array.isArray(lastUserMsg.content)) {
+                    prompt = lastUserMsg.content.filter(b => b.type === 'text').map(b => b.text).join('\n');
+                }
+            }
+
+            if (!prompt) {
+                return res.status(400).json({ type: 'error', error: { type: 'invalid_request_error', message: 'No valid prompt found.' }});
+            }
+
+            let success = false;
+            let retryCount = 0;
+            const maxRetries = keys.length;
+
+            while (!success && retryCount < maxRetries) {
+                try {
+                    const agentHeaders = getAntigravityHeaders();
+                    const CLOUD_CODE_BASE = 'https://cloudcode-pa.googleapis.com';
+                    const DEFAULT_PROJECT_ID = 'rising-fact-p41fc';
+                    const apiModel = model.replace(/^antigravity-/i, '');
+
+                    const url = `${CLOUD_CODE_BASE}/v1internal:streamGenerateContent?alt=sse`;
+                    const headers = {
+                        'Authorization': `Bearer ${keys[currentKeyIndex]}`,
+                        'Content-Type': 'application/json',
+                        ...agentHeaders
+                    };
+
+                    const requestBody = {
+                        project: DEFAULT_PROJECT_ID,
+                        model: apiModel,
+                        request: {
+                            contents: [{ role: 'user', parts: [{ text: prompt }] }],
+                            systemInstruction: { parts: [{ text: ANTIGRAVITY_SYSTEM_INSTRUCTION }] },
+                            generationConfig: { temperature, maxOutputTokens: max_tokens,
+                                thinkingConfig: { includeThoughts: true, thinkingBudget: 1024 }
+                            }
+                        }
+                    };
+
+                    // Soft Quota Check
+                    if (keys.length > 1) {
+                        try {
+                            const qRes = await fetch(`${CLOUD_CODE_BASE}/v1internal:fetchAvailableModels`, {
+                                method: 'POST',
+                                headers: { 'Authorization': `Bearer ${keys[currentKeyIndex]}`, 'Content-Type': 'application/json', ...getAntigravityHeaders() },
+                                body: JSON.stringify({ project: DEFAULT_PROJECT_ID })
+                            });
+                            if (qRes.ok) {
+                                const qData = await qRes.json();
+                                const modelsObj = qData.models || {};
+                                for (const [mName, entry] of Object.entries(modelsObj)) {
+                                    if ((mName.includes(apiModel) || apiModel.includes(mName)) && entry?.quotaInfo) {
+                                        if (Number(entry.quotaInfo.remainingFraction || 0) <= 0.05) {
+                                            throw new Error('Soft Quota Exceeded');
+                                        }
+                                    }
+                                }
+                            }
+                        } catch (qErr) { if (qErr.message.includes('Soft Quota')) throw qErr; }
+                    }
+
+                    console.log(chalk.cyan(`[API /v1/messages] Request received: Model=${apiModel}, Account=${currentKeyIndex + 1}/${keys.length}, Stream=${stream}`));
+
+                    const fetchRes = await fetch(url, { method: 'POST', headers, body: JSON.stringify(requestBody) });
+                    if (!fetchRes.ok) throw new Error(`${fetchRes.status} - ${await fetchRes.text()}`);
+
+                    const reader = fetchRes.body.getReader();
+                    const decoder = new TextDecoder();
+                    let fullText = '';
+                    let buffer = '';
+
+                    if (stream) {
+                        res.setHeader('Content-Type', 'text/event-stream');
+                        res.setHeader('Cache-Control', 'no-cache');
+                        res.setHeader('Connection', 'keep-alive');
+                        // Send initial message_start event
+                        const msgId = 'msg_' + Date.now();
+                        res.write(`event: message_start\ndata: ${JSON.stringify({ type: 'message_start', message: { id: msgId, type: 'message', role: 'assistant', content: [], model: apiModel, stop_reason: null, usage: { input_tokens: 0, output_tokens: 0 }}})}\n\n`);
+                        res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' }})}\n\n`);
+                    }
+
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+                        buffer += decoder.decode(value, { stream: true });
+                        const blocks = buffer.split('data: ');
+                        buffer = blocks.pop();
+                        for (let block of blocks) {
+                            block = block.trim();
+                            if (!block || block === '[DONE]') continue;
+                            try {
+                                const parsed = JSON.parse(block.split('\n')[0]);
+                                if (parsed.error) throw new Error(`API Error: ${parsed.error.message}`);
+                                const candidate = parsed.response?.candidates?.[0] || parsed.candidates?.[0];
+                                if (candidate?.content?.parts) {
+                                    for (const part of candidate.content.parts) {
+                                        if (part.text) {
+                                            fullText += part.text;
+                                            if (stream) {
+                                                res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: part.text }})}\n\n`);
+                                            }
+                                        }
+                                    }
+                                }
+                            } catch (e) { if (e.message.includes('API Error')) throw e; }
+                        }
+                    }
+
+                    if (!fullText.trim()) throw new Error('Empty response');
+
+                    if (stream) {
+                        res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: 0 })}\n\n`);
+                        res.write(`event: message_delta\ndata: ${JSON.stringify({ type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { output_tokens: fullText.length }})}\n\n`);
+                        res.write(`event: message_stop\ndata: ${JSON.stringify({ type: 'message_stop' })}\n\n`);
+                        res.end();
+                    } else {
+                        res.json({
+                            id: 'msg_' + Date.now(),
+                            type: 'message',
+                            role: 'assistant',
+                            content: [{ type: 'text', text: fullText }],
+                            model: apiModel,
+                            stop_reason: 'end_turn',
+                            usage: { input_tokens: 0, output_tokens: fullText.length }
+                        });
+                    }
+
+                    success = true;
+                    console.log(chalk.green(`[API /v1/messages] Request completed successfully.`));
+
+                } catch (error) {
+                    console.error(chalk.yellow(`[API Error]: Account-${currentKeyIndex + 1} rejected: `) + chalk.gray(error.message));
+                    currentKeyIndex++;
+                    if (currentKeyIndex >= keys.length) currentKeyIndex = 0;
+                    retryCount++;
+                }
+            }
+
+            if (!success && !res.headersSent) {
+                res.status(500).json({ type: 'error', error: { type: 'api_error', message: 'All tokens exhausted.' }});
+            }
+        } catch (globalErr) {
+            console.error(chalk.red('[API Fatal Error]'), globalErr);
+            if (!res.headersSent) {
+                res.status(500).json({ type: 'error', error: { type: 'api_error', message: globalErr.message }});
+            }
+        }
+    });
+
     app.listen(port, () => {
         console.log(chalk.bgGreen.black(`\n🚀 Antigravity API Server running on port ${port}!\n`));
-        console.log(chalk.white(`Endpoint:`), chalk.cyan(`http://localhost:${port}/v1/chat/completions`));
-        console.log(chalk.white(`OpenAI-compatible. Works with Cursor, VSCode, and any OpenAI client.`));
+        console.log(chalk.white(`Endpoints:`));
+        console.log(chalk.cyan(`  OpenAI:     http://localhost:${port}/v1/chat/completions`));
+        console.log(chalk.cyan(`  Anthropic:  http://localhost:${port}/v1/messages`));
+        console.log(chalk.cyan(`  Models:     http://localhost:${port}/v1/models`));
+        console.log(chalk.white(`\nCompatible with Cursor, VSCode, Claude Code, Aider, and any OpenAI/Anthropic client.`));
         console.log(chalk.gray(`Press Ctrl+C to stop.\n`));
     });
 }
