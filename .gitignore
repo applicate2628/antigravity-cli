@@ -1,0 +1,33 @@
+# Dependencies
+node_modules/
+
+# Sensitive credentials - NEVER commit these!
+keys.json
+config.json
+
+# PM2 / Process Manager
+ecosystem.config.cjs
+
+# OS generated files
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# IDE / Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+npm-debug.log*
+
+# Environment variables
+.env
+.env.local
+.env.production
+
+# Debug & test scripts
+check_models.js
