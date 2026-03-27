@@ -60,12 +60,14 @@ export async function startApiServer(port) {
 
             let success = false;
             let retryCount = 0;
+            let currentModel = model;
             const maxRetries = keys.length;
+            let hasTriedFallback = false;
 
             while (!success && retryCount < maxRetries) {
                 try {
                     const isApiKey = keys[currentKeyIndex] && keys[currentKeyIndex].startsWith('AIza');
-                    const apiModel = model.replace(/^antigravity-/i, '');
+                    const apiModel = currentModel.replace(/^antigravity-/i, '');
                     const CLOUD_CODE_BASE = 'https://cloudcode-pa.googleapis.com';
                     const DEFAULT_PROJECT_ID = 'rising-fact-p41fc';
                     
@@ -121,20 +123,17 @@ export async function startApiServer(port) {
                                 },
                                 body: JSON.stringify({ project: DEFAULT_PROJECT_ID })
                             });
+                            
                             if (qRes.ok) {
                                 const qData = await qRes.json();
                                 const modelsObj = qData.models || {};
-                                let targetEntry = null;
+                                
                                 for (const [mName, entry] of Object.entries(modelsObj)) {
-                                    if (mName.includes(apiModel) || apiModel.includes(mName)) {
-                                        targetEntry = entry;
-                                        break;
-                                    }
-                                }
-                                if (targetEntry?.quotaInfo) {
-                                    const rf = Number(targetEntry.quotaInfo.remainingFraction || 0);
-                                    if (rf <= 0.05) {
-                                        throw new Error(`Soft Quota Exceeded: Only ${Math.round(rf*100)}% remaining. Auto-switching to next account.`);
+                                    if ((mName.includes(apiModel) || apiModel.includes(mName)) && entry?.quotaInfo) {
+                                        const rf = Number(entry.quotaInfo.remainingFraction || 0);
+                                        if (rf <= 0.05) {
+                                            throw new Error(`Soft Quota Exceeded: Only ${Math.round(rf*100)}% remaining.`);
+                                        }
                                     }
                                 }
                             }
@@ -349,14 +348,16 @@ export async function startApiServer(port) {
 
             let success = false;
             let retryCount = 0;
+            let currentModel = model;
             const maxRetries = keys.length;
+            let hasTriedFallback = false;
 
             while (!success && retryCount < maxRetries) {
                 try {
                     const agentHeaders = getAntigravityHeaders();
                     const CLOUD_CODE_BASE = 'https://cloudcode-pa.googleapis.com';
                     const DEFAULT_PROJECT_ID = 'rising-fact-p41fc';
-                    const apiModel = model.replace(/^antigravity-/i, '');
+                    const apiModel = currentModel.replace(/^antigravity-/i, '');
 
                     const url = `${CLOUD_CODE_BASE}/v1internal:streamGenerateContent?alt=sse`;
                     const headers = {
@@ -390,8 +391,9 @@ export async function startApiServer(port) {
                                 const modelsObj = qData.models || {};
                                 for (const [mName, entry] of Object.entries(modelsObj)) {
                                     if ((mName.includes(apiModel) || apiModel.includes(mName)) && entry?.quotaInfo) {
-                                        if (Number(entry.quotaInfo.remainingFraction || 0) <= 0.05) {
-                                            throw new Error('Soft Quota Exceeded');
+                                        const rf = Number(entry.quotaInfo.remainingFraction || 0);
+                                        if (rf <= 0.05) {
+                                            throw new Error(`Soft Quota Exceeded: Only ${Math.round(rf*100)}% remaining.`);
                                         }
                                     }
                                 }
@@ -483,10 +485,17 @@ export async function startApiServer(port) {
                     console.log(chalk.green(`[API /v1/responses] Request completed successfully.`));
 
                 } catch (error) {
-                    console.error(chalk.yellow(`[API Error]: Account-${currentKeyIndex + 1} rejected: `) + chalk.gray(error.message));
+                    console.error(chalk.yellow(`\n[API Error]: Account-${currentKeyIndex + 1} rejected: `) + chalk.gray(error.message));
                     currentKeyIndex++;
                     if (currentKeyIndex >= keys.length) currentKeyIndex = 0;
                     retryCount++;
+
+                    if (retryCount >= maxRetries && !hasTriedFallback && (currentModel.includes('claude-opus-') || currentModel.includes('claude-sonnet-'))) {
+                        console.log(chalk.magenta(`\n[Fallback] All accounts exhausted for ${currentModel}. Falling back to gemini-3.1-pro-high...`));
+                        currentModel = 'gemini-3.1-pro-high';
+                        retryCount = 0;
+                        hasTriedFallback = true;
+                    }
                 }
             }
 
@@ -623,14 +632,16 @@ export async function startApiServer(port) {
 
             let success = false;
             let retryCount = 0;
+            let currentModel = model;
             const maxRetries = keys.length;
+            let hasTriedFallback = false;
 
             while (!success && retryCount < maxRetries) {
                 try {
                     const agentHeaders = getAntigravityHeaders();
                     const CLOUD_CODE_BASE = 'https://cloudcode-pa.googleapis.com';
                     const DEFAULT_PROJECT_ID = 'rising-fact-p41fc';
-                    const apiModel = model.replace(/^antigravity-/i, '');
+                    const apiModel = currentModel.replace(/^antigravity-/i, '');
 
                     const url = `${CLOUD_CODE_BASE}/v1internal:streamGenerateContent?alt=sse`;
                     const headers = {
@@ -665,8 +676,9 @@ export async function startApiServer(port) {
                                 const modelsObj = qData.models || {};
                                 for (const [mName, entry] of Object.entries(modelsObj)) {
                                     if ((mName.includes(apiModel) || apiModel.includes(mName)) && entry?.quotaInfo) {
-                                        if (Number(entry.quotaInfo.remainingFraction || 0) <= 0.05) {
-                                            throw new Error('Soft Quota Exceeded');
+                                        const rf = Number(entry.quotaInfo.remainingFraction || 0);
+                                        if (rf <= 0.05) {
+                                            throw new Error(`Soft Quota Exceeded: Only ${Math.round(rf*100)}% remaining.`);
                                         }
                                     }
                                 }
@@ -818,6 +830,13 @@ export async function startApiServer(port) {
                     currentKeyIndex++;
                     if (currentKeyIndex >= keys.length) currentKeyIndex = 0;
                     retryCount++;
+
+                    if (retryCount >= maxRetries && !hasTriedFallback && (currentModel.includes('claude-opus-') || currentModel.includes('claude-sonnet-'))) {
+                        console.log(chalk.magenta(`\n[Fallback] All accounts exhausted for ${currentModel}. Falling back to gemini-3.1-pro-high...`));
+                        currentModel = 'gemini-3.1-pro-high';
+                        retryCount = 0;
+                        hasTriedFallback = true;
+                    }
                 }
             }
 
