@@ -2,7 +2,7 @@ import express from 'express';
 import chalk from 'chalk';
 import fs from 'fs/promises';
 import path from 'path';
-import { ANTIGRAVITY_SYSTEM_INSTRUCTION, getAntigravityHeaders } from 'opencode-antigravity-auth/dist/src/constants.js';
+import { ANTIGRAVITY_SYSTEM_INSTRUCTION, getAntigravityHeaders } from './constants.js';
 import { getValidTokens } from './auth.js';
 
 export async function startApiServer(port) {

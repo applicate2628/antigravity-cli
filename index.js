@@ -8,7 +8,7 @@ import path from 'path';
 import open from 'open';
 import express from 'express';
 import promptsLib from 'prompts';
-import { ANTIGRAVITY_SYSTEM_INSTRUCTION, getAntigravityHeaders } from 'opencode-antigravity-auth/dist/src/constants.js';
+import { ANTIGRAVITY_SYSTEM_INSTRUCTION, getAntigravityHeaders } from './constants.js';
 import { startApiServer } from './api-server.js';
 import { getValidTokens } from './auth.js';
 
