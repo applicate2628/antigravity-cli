@@ -2,30 +2,64 @@ import express from 'express';
 import chalk from 'chalk';
 import fs from 'fs/promises';
 import path from 'path';
-import { ANTIGRAVITY_SYSTEM_INSTRUCTION, getAntigravityHeaders } from './constants.js';
-import { getValidTokens } from './auth.js';
+import { ANTIGRAVITY_SYSTEM_INSTRUCTION, getAntigravityHeaders, setAntigravityVersion } from 'opencode-antigravity-auth/dist/src/constants.js';
+import { getValidAccounts, getInstalledAntigravityVersion } from './auth.js';
+
+const CLOUD_CODE_BASE = 'https://daily-cloudcode-pa.sandbox.googleapis.com';
+
+const BACKEND_MODELS = new Set([
+    'claude-opus-4-6-thinking',
+    'claude-sonnet-4-6',
+    'gemini-3.1-pro-high',
+    'gemini-3.1-pro-low',
+    'gemini-3-flash-agent'
+]);
+
+function resolveModel(requested) {
+    if (!requested || typeof requested !== 'string') return 'claude-opus-4-6-thinking';
+    const lc = requested.toLowerCase();
+    if (BACKEND_MODELS.has(lc)) return lc;
+    if (lc.includes('opus')) return 'claude-opus-4-6-thinking';
+    if (lc.includes('sonnet') || lc.includes('haiku')) return 'claude-sonnet-4-6';
+    if (lc.includes('flash')) return 'gemini-3-flash-agent';
+    if (lc.includes('gemini')) {
+        if (lc.includes('low')) return 'gemini-3.1-pro-low';
+        return 'gemini-3.1-pro-high';
+    }
+    return 'claude-opus-4-6-thinking';
+}
 
 export async function startApiServer(port) {
+    const detectedVersion = await getInstalledAntigravityVersion();
+    if (detectedVersion) {
+        setAntigravityVersion(detectedVersion);
+        console.log(chalk.gray(`[Init] Antigravity version set to ${detectedVersion} (from installed IDE)`));
+    }
+
     const app = express();
     app.use(express.json({ limit: '50mb' }));
 
-    // Load tokens (re-reads on each request for hot-reload support)
+    // Returns { keys, projects } where keys[i] is access_token and projects[i] is project_id for that account.
     const getKeys = async () => {
-        return await getValidTokens();
+        const accounts = await getValidAccounts();
+        return {
+            keys: accounts.map(a => a.access_token),
+            projects: accounts.map(a => a.project_id)
+        };
     };
 
     let currentKeyIndex = 0;
 
     app.post('/v1/chat/completions', async (req, res) => {
         try {
-            const keys = await getKeys();
+            const { keys, projects } = await getKeys();
             if (keys.length === 0) {
                 return res.status(401).json({ error: "No auth tokens found. Run 'node index.js login' first." });
             }
 
             const { messages = [], stream = false, temperature = 0.7 } = req.body;
-            // Hard-coded to Claude Opus 4.6 Thinking (ignores client model selection)
-            const model = 'claude-opus-4-6-thinking';
+            const model = resolveModel(req.body.model);
+            console.log(chalk.gray(`[API /v1/chat/completions] requested=${req.body.model || '(none)'} resolved=${model}`));
             
             // Extract system message and build conversation
             const systemMsg = messages.filter(m => m.role === 'system').map(m => m.content).join('\n');
@@ -68,8 +102,7 @@ export async function startApiServer(port) {
                 try {
                     const isApiKey = keys[currentKeyIndex] && keys[currentKeyIndex].startsWith('AIza');
                     const apiModel = currentModel.replace(/^antigravity-/i, '');
-                    const CLOUD_CODE_BASE = 'https://cloudcode-pa.googleapis.com';
-                    const DEFAULT_PROJECT_ID = 'rising-fact-p41fc';
+                    const DEFAULT_PROJECT_ID = projects[currentKeyIndex];
                     
                     let url, headers, requestBody;
 
@@ -296,13 +329,13 @@ export async function startApiServer(port) {
     // --- /v1/responses endpoint (OpenAI Codex compatibility) ---
     app.post('/v1/responses', async (req, res) => {
         try {
-            const keys = await getKeys();
+            const { keys, projects } = await getKeys();
             if (keys.length === 0) {
                 return res.status(401).json({ error: { message: "No auth tokens found. Run 'node index.js login' first." }});
             }
 
             const { input = '', instructions = '', stream = false, max_output_tokens = 8192, temperature = 0.7 } = req.body;
-            const model = 'claude-opus-4-6-thinking';
+            const model = resolveModel(req.body.model);
 
             // Build prompt from input (can be string or array of messages)
             let conversationParts = [];
@@ -355,8 +388,7 @@ export async function startApiServer(port) {
             while (!success && retryCount < maxRetries) {
                 try {
                     const agentHeaders = getAntigravityHeaders();
-                    const CLOUD_CODE_BASE = 'https://cloudcode-pa.googleapis.com';
-                    const DEFAULT_PROJECT_ID = 'rising-fact-p41fc';
+                    const DEFAULT_PROJECT_ID = projects[currentKeyIndex];
                     const apiModel = currentModel.replace(/^antigravity-/i, '');
 
                     const url = `${CLOUD_CODE_BASE}/v1internal:streamGenerateContent?alt=sse`;
@@ -510,16 +542,52 @@ export async function startApiServer(port) {
         }
     });
 
+    // Claude Code CLI probes this on startup to validate the selected model.
+    // Exact counts aren't required — it only needs a 200 with `input_tokens`.
+    app.post('/v1/messages/count_tokens', (req, res) => {
+        try {
+            const { messages = [], system = '', tools = [] } = req.body || {};
+            let chars = 0;
+
+            const addText = (v) => {
+                if (v == null) return;
+                if (typeof v === 'string') { chars += v.length; return; }
+                if (Array.isArray(v)) { v.forEach(addText); return; }
+                if (typeof v === 'object') {
+                    if (typeof v.text === 'string') chars += v.text.length;
+                    if (typeof v.content === 'string') chars += v.content.length;
+                    else if (Array.isArray(v.content)) v.content.forEach(addText);
+                    if (v.input && typeof v.input === 'object') chars += JSON.stringify(v.input).length;
+                }
+            };
+
+            addText(system);
+            messages.forEach(m => addText(m?.content));
+            if (Array.isArray(tools)) {
+                tools.forEach(t => {
+                    if (t?.name) chars += String(t.name).length;
+                    if (t?.description) chars += String(t.description).length;
+                    if (t?.input_schema) chars += JSON.stringify(t.input_schema).length;
+                });
+            }
+
+            res.json({ input_tokens: Math.max(1, Math.ceil(chars / 4)) });
+        } catch (e) {
+            res.status(500).json({ type: 'error', error: { type: 'api_error', message: e.message }});
+        }
+    });
+
     // --- /v1/messages endpoint (Anthropic/Claude Code CLI compatibility) ---
     app.post('/v1/messages', async (req, res) => {
         try {
-            const keys = await getKeys();
+            const { keys, projects } = await getKeys();
             if (keys.length === 0) {
                 return res.status(401).json({ type: 'error', error: { type: 'authentication_error', message: "No auth tokens found. Run 'node index.js login' first." }});
             }
 
             const { messages = [], system = '', tools = undefined, stream = false, max_tokens = 8192, temperature = 0.7 } = req.body;
-            const model = 'claude-opus-4-6-thinking';
+            const model = resolveModel(req.body.model);
+            console.log(chalk.gray(`[API /v1/messages] requested=${req.body.model || '(none)'} resolved=${model} max_tokens=${max_tokens} stream=${stream}`));
 
             // Anthropic -> Gemini Tools translation
             let geminiTools = undefined;
@@ -639,8 +707,7 @@ export async function startApiServer(port) {
             while (!success && retryCount < maxRetries) {
                 try {
                     const agentHeaders = getAntigravityHeaders();
-                    const CLOUD_CODE_BASE = 'https://cloudcode-pa.googleapis.com';
-                    const DEFAULT_PROJECT_ID = 'rising-fact-p41fc';
+                    const DEFAULT_PROJECT_ID = projects[currentKeyIndex];
                     const apiModel = currentModel.replace(/^antigravity-/i, '');
 
                     const url = `${CLOUD_CODE_BASE}/v1internal:streamGenerateContent?alt=sse`;
@@ -657,11 +724,21 @@ export async function startApiServer(port) {
                             contents: conversationParts,
                             tools: geminiTools,
                             systemInstruction: finalSystemPrompt ? { parts: [{ text: finalSystemPrompt }] } : undefined,
-                            generationConfig: { temperature, maxOutputTokens: max_tokens,
-                                thinkingConfig: { includeThoughts: true, thinkingBudget: 1024 }
-                            }
+                            generationConfig: { temperature, maxOutputTokens: max_tokens }
                         }
                     };
+
+                    if (apiModel.includes('thinking') || apiModel.includes('gemini-3')) {
+                        if (apiModel.includes('claude') || apiModel.includes('sonnet')) {
+                            const budget = Math.max(1024, Math.min(8192, Math.floor(max_tokens / 2)));
+                            requestBody.request.generationConfig.thinkingConfig = { includeThoughts: true, thinkingBudget: budget };
+                        } else {
+                            let level = 'medium';
+                            if (apiModel.includes('low')) level = 'low';
+                            if (apiModel.includes('high')) level = 'high';
+                            requestBody.request.generationConfig.thinkingConfig = { includeThoughts: true, thinkingLevel: level };
+                        }
+                    }
 
                     // Soft Quota Check
                     if (keys.length > 1) {
@@ -699,6 +776,16 @@ export async function startApiServer(port) {
                     let blockIndex = 0;
                     let stopReason = 'end_turn';
                     let collectedTools = [];
+                    let receivedCandidate = false;
+
+                    // Gemini finishReason -> Anthropic stop_reason. Called whenever a candidate arrives.
+                    const mapFinishReason = (fr) => {
+                        if (!fr) return null;
+                        if (fr === 'STOP') return 'end_turn';
+                        if (fr === 'MAX_TOKENS') return 'max_tokens';
+                        if (fr === 'SAFETY' || fr === 'RECITATION' || fr === 'BLOCKLIST') return 'stop_sequence';
+                        return 'end_turn';
+                    };
 
                     if (stream) {
                         res.setHeader('Content-Type', 'text/event-stream');
@@ -710,85 +797,91 @@ export async function startApiServer(port) {
 
                     let inThoughtBlock = false;
 
+                    const processBlock = (block) => {
+                        block = block.trim();
+                        if (!block || block === '[DONE]') return;
+                        try {
+                            const parsed = JSON.parse(block.split('\n')[0]);
+                            if (parsed.error) throw new Error(`API Error: ${parsed.error.message}`);
+                            const candidate = parsed.response?.candidates?.[0] || parsed.candidates?.[0];
+                            if (candidate) receivedCandidate = true;
+                            const mapped = mapFinishReason(candidate?.finishReason);
+                            if (mapped) stopReason = mapped;
+                            if (!candidate?.content?.parts) return;
+                            for (const part of candidate.content.parts) {
+                                let textChunk = '';
+                                let isThought = false;
+
+                                if (typeof part.thought === 'string') {
+                                    isThought = true;
+                                    textChunk = part.thought;
+                                } else if (part.text) {
+                                    textChunk = part.text;
+                                    if (part.thought === true || part.isThought === true) {
+                                        isThought = true;
+                                    }
+                                }
+
+                                if (textChunk) {
+                                    let formattedChunk = '';
+
+                                    if (isThought && !inThoughtBlock) {
+                                        inThoughtBlock = true;
+                                        formattedChunk = '<think>\n' + textChunk;
+                                    } else if (!isThought && inThoughtBlock) {
+                                        inThoughtBlock = false;
+                                        formattedChunk = '\n</think>\n\n' + textChunk;
+                                    } else {
+                                        formattedChunk = textChunk;
+                                    }
+
+                                    fullText += formattedChunk;
+                                    if (stream) {
+                                        if (!hasStartedText) {
+                                            res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: blockIndex, content_block: { type: 'text', text: '' }})}\n\n`);
+                                            hasStartedText = true;
+                                        }
+                                        res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: blockIndex, delta: { type: 'text_delta', text: formattedChunk }})}\n\n`);
+                                    }
+                                } else if (part.functionCall) {
+                                    const funcName = part.functionCall.name;
+                                    const argsObj = part.functionCall.args || {};
+                                    const argsStr = JSON.stringify(argsObj);
+                                    const toolId = part.functionCall.id || ('toolu_' + Date.now() + Math.random().toString(36).substring(7));
+                                    collectedTools.push({ type: 'tool_use', id: toolId, name: funcName, input: argsObj });
+
+                                    if (stream) {
+                                        if (hasStartedText) {
+                                            if (inThoughtBlock) {
+                                                fullText += '\n</think>\n\n';
+                                                res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: blockIndex, delta: { type: 'text_delta', text: '\n</think>\n\n' }})}\n\n`);
+                                                inThoughtBlock = false;
+                                            }
+                                            res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: blockIndex })}\n\n`);
+                                            blockIndex++;
+                                            hasStartedText = false;
+                                        }
+                                        res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: blockIndex, content_block: { type: 'tool_use', id: toolId, name: funcName, input: {} } })}\n\n`);
+                                        res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: blockIndex, delta: { type: 'input_json_delta', partial_json: argsStr } })}\n\n`);
+                                        res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: blockIndex })}\n\n`);
+                                        blockIndex++;
+                                        stopReason = 'tool_use';
+                                    }
+                                }
+                            }
+                        } catch (e) { if (e.message.includes('API Error')) throw e; }
+                    };
+
                     while (true) {
                         const { done, value } = await reader.read();
                         if (done) break;
                         buffer += decoder.decode(value, { stream: true });
                         const blocks = buffer.split('data: ');
                         buffer = blocks.pop();
-                        for (let block of blocks) {
-                            block = block.trim();
-                            if (!block || block === '[DONE]') continue;
-                            try {
-                                const parsed = JSON.parse(block.split('\n')[0]);
-                                if (parsed.error) throw new Error(`API Error: ${parsed.error.message}`);
-                                const candidate = parsed.response?.candidates?.[0] || parsed.candidates?.[0];
-                                if (candidate?.content?.parts) {
-                                    for (const part of candidate.content.parts) {
-                                        let textChunk = '';
-                                        let isThought = false;
-
-                                        if (typeof part.thought === 'string') {
-                                            isThought = true;
-                                            textChunk = part.thought;
-                                        } else if (part.text) {
-                                            textChunk = part.text;
-                                            if (part.thought === true || part.isThought === true) {
-                                                isThought = true;
-                                            }
-                                        }
-
-                                        if (textChunk) {
-                                            let formattedChunk = '';
-
-                                            if (isThought && !inThoughtBlock) {
-                                                inThoughtBlock = true;
-                                                formattedChunk = '<think>\n' + textChunk;
-                                            } else if (!isThought && inThoughtBlock) {
-                                                inThoughtBlock = false;
-                                                formattedChunk = '\n</think>\n\n' + textChunk;
-                                            } else {
-                                                formattedChunk = textChunk;
-                                            }
-
-                                            fullText += formattedChunk;
-                                            if (stream) {
-                                                if (!hasStartedText) {
-                                                    res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: blockIndex, content_block: { type: 'text', text: '' }})}\n\n`);
-                                                    hasStartedText = true;
-                                                }
-                                                res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: blockIndex, delta: { type: 'text_delta', text: formattedChunk }})}\n\n`);
-                                            }
-                                        } else if (part.functionCall) {
-                                            const funcName = part.functionCall.name;
-                                            const argsObj = part.functionCall.args || {};
-                                            const argsStr = JSON.stringify(argsObj);
-                                            const toolId = part.functionCall.id || ('toolu_' + Date.now() + Math.random().toString(36).substring(7));
-                                            collectedTools.push({ type: 'tool_use', id: toolId, name: funcName, input: argsObj });
-
-                                            if (stream) {
-                                                if (hasStartedText) {
-                                                    if (inThoughtBlock) {
-                                                        fullText += '\n</think>\n\n';
-                                                        res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: blockIndex, delta: { type: 'text_delta', text: '\n</think>\n\n' }})}\n\n`);
-                                                        inThoughtBlock = false;
-                                                    }
-                                                    res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: blockIndex })}\n\n`);
-                                                    blockIndex++;
-                                                    hasStartedText = false;
-                                                }
-                                                res.write(`event: content_block_start\ndata: ${JSON.stringify({ type: 'content_block_start', index: blockIndex, content_block: { type: 'tool_use', id: toolId, name: funcName, input: {} } })}\n\n`);
-                                                res.write(`event: content_block_delta\ndata: ${JSON.stringify({ type: 'content_block_delta', index: blockIndex, delta: { type: 'input_json_delta', partial_json: argsStr } })}\n\n`);
-                                                res.write(`event: content_block_stop\ndata: ${JSON.stringify({ type: 'content_block_stop', index: blockIndex })}\n\n`);
-                                                blockIndex++;
-                                                stopReason = 'tool_use';
-                                            }
-                                        }
-                                    }
-                                }
-                            } catch (e) { if (e.message.includes('API Error')) throw e; }
-                        }
+                        for (let block of blocks) processBlock(block);
                     }
+                    // Flush any trailing complete block the while-loop left in buffer.
+                    if (buffer) processBlock(buffer);
 
                     if (inThoughtBlock) {
                         fullText += '\n</think>\n\n';
@@ -797,7 +890,10 @@ export async function startApiServer(port) {
                         }
                     }
 
-                    if (!fullText.trim() && collectedTools.length === 0) throw new Error('Empty response');
+                    if (!receivedCandidate) throw new Error('Empty response (no candidates from backend)');
+                    if (!fullText.trim() && collectedTools.length === 0) {
+                        console.log(chalk.yellow(`[API /v1/messages] Empty text but valid candidate (stop_reason=${stopReason}). Returning empty message.`));
+                    }
 
                     if (stream) {
                         if (hasStartedText) {

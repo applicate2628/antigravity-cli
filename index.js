@@ -8,9 +8,94 @@ import path from 'path';
 import open from 'open';
 import express from 'express';
 import promptsLib from 'prompts';
-import { ANTIGRAVITY_SYSTEM_INSTRUCTION, getAntigravityHeaders } from './constants.js';
+import { ANTIGRAVITY_SYSTEM_INSTRUCTION, getAntigravityHeaders, setAntigravityVersion } from 'opencode-antigravity-auth/dist/src/constants.js';
 import { startApiServer } from './api-server.js';
-import { getValidTokens } from './auth.js';
+import { getValidAccounts, getInstalledAntigravityVersion, getAntigravityProjectFromSettings } from './auth.js';
+
+const AUTH_ENDPOINT = 'https://cloudcode-pa.googleapis.com';
+const INFERENCE_ENDPOINT = 'https://daily-cloudcode-pa.sandbox.googleapis.com';
+
+const detectedIdeVersion = await getInstalledAntigravityVersion();
+if (detectedIdeVersion) setAntigravityVersion(detectedIdeVersion);
+
+async function resolveAndOnboardProject(accessToken) {
+    const version = await getInstalledAntigravityVersion();
+    if (version) setAntigravityVersion(version);
+
+    let projectId = null;
+    let source = null;
+
+    try {
+        const res = await fetch(`${AUTH_ENDPOINT}/v1internal:loadCodeAssist`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${accessToken}`,
+                'Content-Type': 'application/json',
+                ...getAntigravityHeaders()
+            },
+            body: JSON.stringify({ metadata: {} })
+        });
+        if (res.ok) {
+            const data = await res.json();
+            projectId = data.cloudaicompanionProject || data.response?.cloudaicompanionProject || null;
+            if (projectId) source = 'Google managed project';
+        }
+    } catch (e) {
+        console.log(chalk.yellow(`[Auto-detect] loadCodeAssist failed: ${e.message}`));
+    }
+
+    if (!projectId) {
+        projectId = await getAntigravityProjectFromSettings();
+        if (projectId) source = 'Antigravity IDE settings.json';
+    }
+
+    if (!projectId) {
+        console.log(chalk.yellow('\n[!] Could not auto-detect a GCP project for this account.'));
+        console.log(chalk.gray('    This is expected for Workspace accounts that need their own project.'));
+        console.log(chalk.gray('    Create one at: https://console.cloud.google.com/projectcreate'));
+        console.log(chalk.gray('    Then enable "Cloud AI Companion API" on it.\n'));
+        const ans = await promptsLib({
+            type: 'text',
+            name: 'project',
+            message: 'Enter your GCP project_id (or leave empty to skip):',
+            initial: ''
+        });
+        projectId = (ans.project || '').trim() || null;
+        if (projectId) source = 'manual input';
+    }
+
+    if (!projectId) {
+        console.log(chalk.yellow('[!] No project_id set. Account saved but inference will fail until you add one.'));
+        return null;
+    }
+
+    console.log(chalk.green(`[Project] Using ${projectId} (source: ${source})`));
+
+    try {
+        const res = await fetch(`${AUTH_ENDPOINT}/v1internal:onboardUser`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${accessToken}`,
+                'Content-Type': 'application/json',
+                ...getAntigravityHeaders()
+            },
+            body: JSON.stringify({
+                cloudaicompanionProject: projectId,
+                tierId: 'standard-tier',
+                metadata: {}
+            })
+        });
+        if (res.ok) {
+            console.log(chalk.green(`[Onboard] Account registered to ${projectId}`));
+        } else {
+            console.log(chalk.yellow(`[Onboard] Failed (${res.status}), inference may still work if project was previously onboarded.`));
+        }
+    } catch (e) {
+        console.log(chalk.yellow(`[Onboard] Error: ${e.message}`));
+    }
+
+    return projectId;
+}
 
 const program = new Command();
 
@@ -116,9 +201,12 @@ program
         if (!code) throw new Error('Authorization code not received.');
 
         const { tokens } = await oauth2Client.getToken(code);
-        
+
+        console.log(chalk.cyan('\n[Auth] Tokens received. Resolving project...'));
+        const projectId = await resolveAndOnboardProject(tokens.access_token);
+
         const keysPath = path.resolve(process.cwd(), 'keys.json');
-        
+
         let existingKeys = [];
         try {
           const raw = await fs.readFile(keysPath, 'utf8');
@@ -136,11 +224,13 @@ program
         const existingIndex = existingKeys.findIndex(k => k.refresh_token === tokens.refresh_token && tokens.refresh_token != null);
         if (existingIndex > -1) {
             existingKeys[existingIndex] = { ...existingKeys[existingIndex], ...tokens };
+            if (projectId) existingKeys[existingIndex].project_id = projectId;
         } else {
             existingKeys.push({
                 access_token: tokens.access_token,
                 refresh_token: tokens.refresh_token,
-                expiry_date: tokens.expiry_date
+                expiry_date: tokens.expiry_date,
+                ...(projectId ? { project_id: projectId } : {})
             });
         }
 
@@ -178,8 +268,9 @@ program
   .option('-m, --model <name>', 'Model name to use (interactive selection if omitted)')
   .action(async (directPrompts, options) => {
     try {
-      // 1. Load auth tokens
-      const keys = await getValidTokens();
+      // 1. Load auth accounts
+      const accounts = await getValidAccounts();
+      const keys = accounts.map(a => a.access_token);
       if (keys.length === 0) {
         console.error(chalk.red(`\n[Auth Error] No valid tokens found.`));
         console.error(chalk.yellow(`Please sign in with your Google One account:`));
@@ -210,42 +301,10 @@ program
         process.exit(0);
       }
 
-      // 3. Connect to Antigravity API
-      const CLOUD_CODE_BASE = 'https://daily-cloudcode-pa.sandbox.googleapis.com';
-      const DEFAULT_PROJECT_ID = 'rising-fact-p41fc';
+      const CLOUD_CODE_BASE = INFERENCE_ENDPOINT;
       let currentKeyIndex = 0;
-      let projectId = DEFAULT_PROJECT_ID; 
-
-      // Step 1: Onboard user and get managed project ID
-      console.log(chalk.cyan('\n🔗 Connecting to Antigravity server...'));
-      const ONBOARD_URL = `https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist`;
-      try {
-        const onboardRes = await fetch(ONBOARD_URL, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${keys[currentKeyIndex]}`,
-            'Content-Type': 'application/json'
-          },
-          body: JSON.stringify({ metadata: {} })
-        });
-        
-        if (onboardRes.ok) {
-          const onboardData = await onboardRes.json();
-          projectId = onboardData.cloudaicompanionProject || onboardData.response?.cloudaicompanionProject;
-          if (projectId) {
-            console.log(chalk.green(`[✓] Project ID: ${projectId}`));
-          } else {
-             projectId = DEFAULT_PROJECT_ID;
-             console.log(chalk.yellow(`[!] No project returned, using default: ${projectId}`));
-          }
-        } else {
-          console.warn(chalk.yellow(`⚠ Onboard failed (${onboardRes.status}), using default project.`));
-          projectId = DEFAULT_PROJECT_ID;
-        }
-      } catch (e) {
-        console.warn(chalk.yellow(`⚠ Onboard error: ${e.message}`));
-        projectId = DEFAULT_PROJECT_ID;
-      }
+      let projectId = accounts[currentKeyIndex].project_id;
+      console.log(chalk.green(`[✓] Account-${currentKeyIndex + 1} project: ${projectId}`));
 
       // Step 2: Fetch available models (if no model specified)
       if (!options.model) {
@@ -337,8 +396,8 @@ program
               console.log(chalk.dim(`(→ API Key-${currentKeyIndex + 1} via Generative Language API...)`));
             } else {
               const agentHeaders = getAntigravityHeaders();
-              const finalProjectId = projectId || 'rising-fact-p41fc';
-              url = `https://cloudcode-pa.googleapis.com/v1internal:streamGenerateContent?alt=sse`;
+              const finalProjectId = accounts[currentKeyIndex].project_id;
+              url = `${INFERENCE_ENDPOINT}/v1internal:streamGenerateContent?alt=sse`;
               
               headers = {
                 'Authorization': `Bearer ${keys[currentKeyIndex]}`,
@@ -525,35 +584,36 @@ program
   .command('status')
   .description('Check token expiry and AI quota for all accounts.')
   .action(async () => {
-    const keys = await getValidTokens();
-    
-    if (keys.length === 0) {
+    const accounts = await getValidAccounts();
+
+    if (accounts.length === 0) {
       console.log(chalk.yellow('[!] No valid tokens found. Please run "node index.js login" first.'));
       return;
     }
 
-    console.log(chalk.cyan(`\n🔍 Checking ${keys.length} account(s)...\n`));
-    
-    for (let i = 0; i < keys.length; i++) {
-        const token = keys[i];
+    console.log(chalk.cyan(`\n🔍 Checking ${accounts.length} account(s)...\n`));
+
+    for (let i = 0; i < accounts.length; i++) {
+        const token = accounts[i].access_token;
+        const projectId = accounts[i].project_id;
         console.log(chalk.gray(`----------------------------------------------------`));
         try {
             const res = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${token}`);
             if (res.ok) {
                 const data = await res.json();
                 const remainingMin = Math.floor(parseInt(data.expires_in, 10) / 60);
-                console.log(chalk.green(`[✓] Account-${i + 1}: Active! Auth expires in `) + chalk.white.bold(`${remainingMin} minutes`) + chalk.green('.'));
-                
+                console.log(chalk.green(`[✓] Account-${i + 1}: Active! Auth expires in `) + chalk.white.bold(`${remainingMin} minutes`) + chalk.green('.') + chalk.gray(` [project: ${projectId}]`));
+
                 // AI Quota check
                 try {
-                    const quotaRes = await fetch('https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels', {
+                    const quotaRes = await fetch(`${AUTH_ENDPOINT}/v1internal:fetchAvailableModels`, {
                         method: 'POST',
                         headers: {
                             'Authorization': `Bearer ${token}`,
                             'Content-Type': 'application/json',
                             ...getAntigravityHeaders()
                         },
-                        body: JSON.stringify({ project: 'rising-fact-p41fc' })
+                        body: JSON.stringify({ project: projectId })
                     });
                     
                     if (quotaRes.ok) {

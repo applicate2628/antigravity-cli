@@ -17,6 +17,7 @@
     "express": "^5.2.1",
     "google-auth-library": "^10.6.2",
     "open": "^11.0.0",
+    "opencode-antigravity-auth": "^1.6.0",
     "prompts": "^2.4.2"
   }
 }

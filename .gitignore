@@ -20,6 +20,9 @@ Desktop.ini
 *.swo
 *~
 
+# MCP cache / Agent tooling
+.serena/
+
 # Logs
 *.log
 npm-debug.log*
