@@ -262,6 +262,55 @@ program
   });
 
 // ---------------------------------------------------------
+// 1b. LOGOUT COMMAND (Remove a stored account)
+// ---------------------------------------------------------
+program
+  .command('logout')
+  .description('Remove a Google account from the stored credentials.')
+  .action(async () => {
+    await ensureDataDir();
+    const keysPath = getKeysPath();
+
+    let accounts = [];
+    try {
+      accounts = JSON.parse(await fs.readFile(keysPath, 'utf8'));
+    } catch (e) {
+      console.log(chalk.yellow('No accounts found.'));
+      return;
+    }
+    if (accounts.length === 0) {
+      console.log(chalk.yellow('No accounts found.'));
+      return;
+    }
+
+    console.log(chalk.cyan(`\nFound ${accounts.length} account(s):\n`));
+    for (let i = 0; i < accounts.length; i++) {
+      const a = accounts[i];
+      const proj = a.project_id || '(no project)';
+      const tok = a.access_token ? a.access_token.substring(0, 25) + '...' : '(no token)';
+      console.log(`  ${i + 1}. [project: ${proj}]  token: ${tok}`);
+    }
+    console.log();
+
+    const ans = await promptsLib({
+      type: 'number',
+      name: 'idx',
+      message: `Remove which account? (1-${accounts.length}, or 0 to cancel)`,
+      validate: v => (v >= 0 && v <= accounts.length) ? true : `Enter 1-${accounts.length} or 0`
+    });
+
+    if (!ans.idx) {
+      console.log(chalk.gray('Cancelled.'));
+      return;
+    }
+
+    const removed = accounts.splice(ans.idx - 1, 1)[0];
+    await fs.writeFile(keysPath, JSON.stringify(accounts, null, 2));
+    console.log(chalk.green(`\n✓ Removed account ${ans.idx} [project: ${removed.project_id || '?'}]`));
+    console.log(chalk.gray(`${accounts.length} account(s) remaining.\n`));
+  });
+
+// ---------------------------------------------------------
 // 2. ASK COMMAND (Direct terminal queries)
 // ---------------------------------------------------------
 program
