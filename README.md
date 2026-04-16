@@ -128,7 +128,7 @@ In your IDE settings, add a "Manual" or "OpenAI-Compatible" model:
 ## 📦 Installation
 
 ```bash
-git clone https://github.com/krmslmz/antigravity-cli.git
+git clone https://github.com/applicate2628/antigravity-cli.git
 cd antigravity-cli
 npm install
 ```

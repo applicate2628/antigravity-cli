@@ -17,6 +17,55 @@ const _0x1c = 'http://localhost:57936/oauth-callback';
 // missing — normal requests use per-account project_id via getValidAccounts().
 const FALLBACK_PROJECT_ID = 'rising-fact-p41fc';
 
+// User-data directory for keys.json and config.json. Honours ANTIGRAVITY_CLI_DATA
+// if set, otherwise falls back to the OS conventional per-user location so that
+// the CLI is usable via `npx`, `npm link`, or a global install from any cwd.
+function getDataDir() {
+    if (process.env.ANTIGRAVITY_CLI_DATA) return process.env.ANTIGRAVITY_CLI_DATA;
+    const home = os.homedir();
+    if (process.platform === 'win32') {
+        return path.join(process.env.APPDATA || path.join(home, 'AppData', 'Roaming'), 'antigravity-cli');
+    }
+    if (process.platform === 'darwin') {
+        return path.join(home, 'Library', 'Application Support', 'antigravity-cli');
+    }
+    return path.join(process.env.XDG_CONFIG_HOME || path.join(home, '.config'), 'antigravity-cli');
+}
+
+export function getKeysPath() {
+    return path.join(getDataDir(), 'keys.json');
+}
+
+export function getConfigPath() {
+    return path.join(getDataDir(), 'config.json');
+}
+
+// First-call idempotent: create the data dir and, on the first invocation only,
+// copy any pre-refactor repo-local keys.json / config.json from process.cwd()
+// into the data dir so users upgrading from the old layout don't have to re-login.
+// The legacy files are left in place as a backup for the user to delete manually.
+let _migrationDone = false;
+export async function ensureDataDir() {
+    const dir = getDataDir();
+    await fs.mkdir(dir, { recursive: true });
+    if (_migrationDone) return dir;
+    _migrationDone = true;
+    for (const name of ['keys.json', 'config.json']) {
+        const target = path.join(dir, name);
+        try { await fs.access(target); continue; } catch { /* target missing — check legacy */ }
+        const legacy = path.resolve(process.cwd(), name);
+        try {
+            await fs.access(legacy);
+            await fs.writeFile(target, await fs.readFile(legacy, 'utf8'));
+            console.log(chalk.yellow(`[Migration] Copied legacy ${name}:`));
+            console.log(chalk.yellow(`[Migration]   ${legacy}`));
+            console.log(chalk.yellow(`[Migration]   -> ${target}`));
+            console.log(chalk.yellow(`[Migration] You can delete the legacy file after verifying the new one works.`));
+        } catch { /* legacy absent — nothing to migrate */ }
+    }
+    return dir;
+}
+
 // Detect installed Antigravity version from its product.json. Falls back to the
 // auth package's hardcoded version if not installed. Google's backend rejects
 // outdated User-Agent versions, so this must match the user's actual install.
@@ -55,7 +104,8 @@ export async function getAntigravityProjectFromSettings() {
 
 async function loadConfig() {
     try {
-        const configPath = path.resolve(process.cwd(), 'config.json');
+        await ensureDataDir();
+        const configPath = getConfigPath();
         const data = await fs.readFile(configPath, 'utf8');
         return JSON.parse(data);
     } catch (e) {
@@ -88,7 +138,8 @@ export async function getValidAccounts() {
 }
 
 async function loadAndRefreshKeys() {
-    const keysPath = path.resolve(process.cwd(), 'keys.json');
+    await ensureDataDir();
+    const keysPath = getKeysPath();
     let rawKeys;
     try {
         rawKeys = await fs.readFile(keysPath, 'utf8');
@@ -131,7 +182,8 @@ async function loadAndRefreshKeys() {
 
 // Loads all tokens from keys.json. Auto-refreshes any that expire within 5 minutes.
 export async function getValidTokens() {
-    const keysPath = path.resolve(process.cwd(), 'keys.json');
+    await ensureDataDir();
+    const keysPath = getKeysPath();
     let rawKeys;
     try {
         rawKeys = await fs.readFile(keysPath, 'utf8');

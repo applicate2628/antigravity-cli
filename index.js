@@ -10,7 +10,7 @@ import express from 'express';
 import promptsLib from 'prompts';
 import { ANTIGRAVITY_SYSTEM_INSTRUCTION, getAntigravityHeaders, setAntigravityVersion } from 'opencode-antigravity-auth/dist/src/constants.js';
 import { startApiServer } from './api-server.js';
-import { getValidAccounts, getInstalledAntigravityVersion, getAntigravityProjectFromSettings } from './auth.js';
+import { getValidAccounts, getInstalledAntigravityVersion, getAntigravityProjectFromSettings, getKeysPath, getConfigPath, ensureDataDir } from './auth.js';
 
 const AUTH_ENDPOINT = 'https://cloudcode-pa.googleapis.com';
 const INFERENCE_ENDPOINT = 'https://daily-cloudcode-pa.sandbox.googleapis.com';
@@ -107,7 +107,8 @@ const _0x1c = 'http://localhost:57936/oauth-callback';
 
 async function getOAuthClient() {
     try {
-        const configPath = path.resolve(process.cwd(), 'config.json');
+        await ensureDataDir();
+        const configPath = getConfigPath();
         const data = await fs.readFile(configPath, 'utf8');
         const config = JSON.parse(data);
         return new OAuth2Client(config.CLIENT_ID, config.CLIENT_SECRET, config.REDIRECT_URI);
@@ -151,8 +152,9 @@ program
 
     const response = await promptsLib(questions);
     if (response.CLIENT_ID && response.CLIENT_SECRET) {
+      await ensureDataDir();
       await fs.writeFile(
-        path.resolve(process.cwd(), 'config.json'),
+        getConfigPath(),
         JSON.stringify(response, null, 2)
       );
       console.log(chalk.green('\n✅ config.json created successfully! Now you can run "node index.js login".\n'));
@@ -205,7 +207,8 @@ program
         console.log(chalk.cyan('\n[Auth] Tokens received. Resolving project...'));
         const projectId = await resolveAndOnboardProject(tokens.access_token);
 
-        const keysPath = path.resolve(process.cwd(), 'keys.json');
+        await ensureDataDir();
+        const keysPath = getKeysPath();
 
         let existingKeys = [];
         try {
