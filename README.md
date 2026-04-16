@@ -1,12 +1,32 @@
 # 🔓 Antigravity CLI
 
+> **🚨 WARNING: RISK OF AI SERVICE SUSPENSION**
+>
+> Google actively detects and **disables AI services** for accounts that use third-party tools to access Antigravity/Gemini Code Assist internal APIs outside the official IDE. This tool does exactly that, and using it is an explicit violation of Google's Terms of Service.
+>
+> **What happens:** AI features on your Google account are **suspended** with a **403 "Terms of Service violation"** error. This affects not just this CLI, but also Gemini in your browser, Gemini Code Assist in the IDE, and Google AI Studio. Your Google account and subscription remain active — only the AI service access is disabled. A first offense can be appealed; a **second offense results in a permanent suspension**.
+>
+> Google's appeal form states:
+> *"I understand using third party software, tools, or services (e.g. Claude Code, OpenCode, OpenClaw) to access my Antigravity/Gemini CLI login violates applicable terms and policies."*
+>
+> This means connecting **any** external tool (Claude Code, Cursor, Aider, etc.) to this proxy and routing requests through your Antigravity login is a bannable offense. The tools themselves are not the problem — the violation is using your **Antigravity/Gemini OAuth credentials** through an unauthorized client.
+>
+> **Official alternatives that do NOT violate ToS:**
+> - [Gemini CLI](https://github.com/google-gemini/gemini-cli) — Google's official CLI for Gemini (uses your Google account directly, no ban risk)
+> - [Gemini API](https://aistudio.google.com/) — official API with your own API key
+> - [Anthropic API](https://console.anthropic.com/) — for Claude models directly (completely separate from Google, unaffected by any Google ban)
+>
+> **Use this tool at your own risk. The authors are not responsible for account suspensions.**
+
+---
+
 **Use Claude Opus 4.6, Gemini 3.1 Pro and other premium AI models outside of Antigravity IDE — from your terminal, Cursor, VSCode, or any OpenAI-compatible tool.**
 
 ![Antigravity CLI Demo](Recording%202026-03-25%20224251.gif)
 
 Antigravity IDE locks its AI features inside its own editor window. This CLI breaks that limitation by exposing the same models as a local OpenAI-compatible API server, so you can use them **anywhere**.
 
-> **What this does:** Your Google One AI Premium subscription gives you access to Claude Opus, Gemini Pro, etc. through Antigravity IDE. This tool lets you use those same models from any tool — not just the Antigravity editor.
+> **What this does:** Your Google One AI Premium subscription gives you access to Claude Opus, Gemini Pro, etc. through Antigravity IDE. This tool lets you use those same models from any tool — not just the Antigravity editor. **See the warning above before proceeding.**
 
 ### 🚀 Integration with Developer Tools
 
@@ -127,11 +147,57 @@ In your IDE settings, add a "Manual" or "OpenAI-Compatible" model:
 
 ## 📦 Installation
 
+### Option A: Global install from GitHub (recommended)
+
+Install once, use from any directory:
+
+```bash
+npm install -g github:applicate2628/antigravity-cli
+```
+
+After this, all commands are available globally:
+
+```bash
+antigravity-cli login          # add a Google account
+antigravity-cli logout         # remove a stored account
+antigravity-cli status         # check token expiry and AI quota
+antigravity-cli serve          # start the API server on :6012
+antigravity-cli ask "..."      # one-shot question from terminal
+```
+
+To update after repo changes: `npm install -g github:applicate2628/antigravity-cli` again.
+
+### Option B: Run directly via npx (no install)
+
+No global install needed — npx downloads from GitHub on first run and caches it:
+
+```bash
+npx github:applicate2628/antigravity-cli login
+npx github:applicate2628/antigravity-cli status
+npx github:applicate2628/antigravity-cli serve
+npx github:applicate2628/antigravity-cli ask -m gemini-3.1-pro-high "hello"
+```
+
+### Option C: Clone the repo (for contributors)
+
 ```bash
 git clone https://github.com/applicate2628/antigravity-cli.git
 cd antigravity-cli
 npm install
 ```
+
+Then use `node index.js <command>` instead of `antigravity-cli <command>`.
+
+### Where are credentials stored?
+
+All three options store `keys.json` and `config.json` in the same per-user data directory — independent of where you run the command:
+
+- **Windows**: `%APPDATA%\antigravity-cli\`
+- **macOS**: `~/Library/Application Support/antigravity-cli/`
+- **Linux**: `$XDG_CONFIG_HOME/antigravity-cli/` or `~/.config/antigravity-cli/`
+- **Override**: set `ANTIGRAVITY_CLI_DATA=/custom/path`
+
+Credentials persist across npx cache clears, npm reinstalls, and repo deletions — you never have to log in again unless you explicitly `logout`.
 
 **Requirements:**
 
@@ -163,7 +229,15 @@ After the OAuth redirect, the CLI resolves the account's `project_id` through a 
    This is the **only automatic path for Workspace accounts**, because their OAuth token does not return `cloudaicompanionProject`. If you have a Workspace account but do not have Antigravity IDE installed (or never signed in to it), this step finds nothing and the CLI falls through to step 3.
 3. **Manual input** — the CLI interactively asks you to paste the project ID. You can leave it empty to skip, but inference will fail until you add a `project_id` to `keys.json` manually.
 
-The resolved `project_id` is persisted **per-account** in `keys.json` and reused on every subsequent request — no re-query to Google, and different accounts can hold different projects. After login, `node index.js status` shows the resolved project next to each account as `[project: ...]`.
+The resolved `project_id` is persisted **per-account** in `keys.json` and reused on every subsequent request — no re-query to Google, and different accounts can hold different projects. After login, `antigravity-cli status` shows the resolved project next to each account as `[project: ...]`.
+
+**Removing an account:**
+
+```bash
+antigravity-cli logout
+```
+
+Shows a numbered list of stored accounts and lets you pick which one to remove. Use this to clean up suspended or unused accounts.
 
 **Adding multiple accounts (recommended):**
 
@@ -336,6 +410,7 @@ node index.js ask -p questions.json
 |---------|-------------|
 | `node index.js setup` | (Optional) Configure your own Google OAuth `CLIENT_ID` / `CLIENT_SECRET` in `config.json` — default embedded values work for most users |
 | `node index.js login` | Add a Google account (run multiple times for multi-account) |
+| `node index.js logout` | Remove a stored account (interactive selection) |
 | `node index.js serve` | Start the local OpenAI- & Anthropic-compatible API server (port 6012) |
 | `node index.js serve -p 8080` | Start on a custom port |
 | `node index.js status` | Check token expiry and AI quota per account |
